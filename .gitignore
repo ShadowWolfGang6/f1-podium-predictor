@@ -1,0 +1,12 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.env
+venv/
+
+# Data cache (too large for GitHub)
+data/raw/
+
+# Mac
+.DS_Store
