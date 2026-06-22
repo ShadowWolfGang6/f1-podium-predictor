@@ -13,6 +13,7 @@ def get_race_results(year, round_number):
     df = session.results
     df["year"] = year
     df["round_number"] = round_number
+    df["Location"] = session.event["Location"]
     return df
 
 def get_all_results(start_year, end_year):
