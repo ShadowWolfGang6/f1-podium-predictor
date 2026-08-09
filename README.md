@@ -31,4 +31,16 @@ python src/model.py
 *To be updated as model is built and validated.*
 
 ## Limitations
-*To be updated honestly after backtesting.*
+
+### Weather Features (Tier 2)
+
+Per-race weather conditions sourced via two parallel pipelines sharing a unified schema (`data/processed/weather.parquet`):
+
+- **Training data (2022–2024):** actual session weather pulled via FastF1's `weather_data`, collapsed to one row per race (`rain_flag`, `avg_track_temp`, `avg_air_temp`, `humidity`).
+- **Live 2026 inference:** pre-race forecasts pulled from Open-Meteo (free, no API key), using a static circuit lat/lon lookup (`data/circuits_lat_lon.csv`). Forecasts are matched to each race's local start hour via FastF1's 2026 event schedule (`Session5`, confirmed accurate on both standard and sprint-format weekends).
+
+Both sources are merged directly on `(year, round_number)`  there is no leakage-safe shift needed, since weather is exogenous per-race information rather than a stat derived from past outcomes.
+
+**Known limitations**
+- **Train/inference mismatch:** training rows use *actual* recorded weather; live rows use a *forecast*, since the true outcome isn't knowable before the race. This is a standard forecast-dependency limitation, not data leakage as weather is knowable before lights out either way, just imperfectly at inference time. A `source` column (`'actual'` vs `'forecast'`) is retained in the raw weather table for auditing, but is not used as a model feature.
+- **`avg_track_temp` is NaN for all forecast rows.** Open-Meteo does not forecast asphalt/track temperature (a function of solar load, not just air weather), only air temperature. Rather than approximate it with a proxy that could silently mislead the model, this field is left honestly missing for live predictions. `avg_air_temp` is the reliable live signal for this feature.
