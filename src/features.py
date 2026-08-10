@@ -23,6 +23,14 @@ TEAM_NAME_TO_ID = {
     "Kick Sauber": "sauber",
 }
 
+# Rebrand consolidation: AlphaTauri->RB and Alfa Romeo->Kick Sauber are the
+# same underlying team across the rename. Standardized on the *current* (2024+) identity, 
+# since that's what the model will be predicting on going into 2026.
+TEAM_REBRAND_MAP = {
+    "alphatauri": "rb",
+    "alfa": "sauber",
+}
+
 def load_results(path: str = "data/processed/race_results.parquet") -> pd.DataFrame:
     df = pd.read_parquet(path)
     df = df.sort_values(by=["year", "round_number", "Position"])
@@ -106,18 +114,28 @@ def add_pu_dnf_rate(df: pd.DataFrame) -> pd.DataFrame:
     merged = df.merge(pu_df, on='TeamId', how='left')
     filtered = merged[(merged["year"] >= merged["start_year"]) & (merged["year"] <= merged["end_year"])]
     filtered = filtered.drop(columns=["start_year", "end_year", "note"])
+
     pu_round_summary = (
-    filtered
-    .groupby(["year", "round_number", "PU_Group"])
-    .agg(
-        dnf_count=("mechanical_dnf", "sum"),
-        car_count=("mechanical_dnf", "count")
-    )
-    .reset_index()
+        filtered
+        .groupby(["year", "round_number", "PU_Group"])
+        .agg(
+            dnf_count=("mechanical_dnf", "sum"),
+            car_count=("mechanical_dnf", "count")
+        )
+        .reset_index()
     )
     pu_round_summary["PU_DNF_Rate"] = pu_round_summary["dnf_count"] / pu_round_summary["car_count"]
-    pu_round_summary["PU_DNF_Rate"] = pu_round_summary.sort_values(["year", "round_number"]).groupby(["year", "PU_Group"])["PU_DNF_Rate"].transform(lambda x: x.shift(1).expanding().mean())
-    df = df.merge(pu_round_summary, on=["year", "round_number", "PU_Group"], how="left")
+    pu_round_summary["PU_DNF_Rate"] = (
+        pu_round_summary.sort_values(["year", "round_number"])
+        .groupby(["year", "PU_Group"])["PU_DNF_Rate"]
+        .transform(lambda x: x.shift(1).expanding().mean())
+    )
+
+    df = df.merge(pu_df[["TeamId", "PU_Group", "start_year", "end_year"]], on="TeamId", how="left")
+    df = df[(df["year"] >= df["start_year"]) & (df["year"] <= df["end_year"])]
+    df = df.drop(columns=["start_year", "end_year"])
+    df = df.merge(pu_round_summary[["year", "round_number", "PU_Group", "PU_DNF_Rate"]], on=["year", "round_number", "PU_Group"], how="left")
+
     return df
 
 def add_standings_position(df: pd.DataFrame) -> pd.DataFrame:
@@ -142,7 +160,7 @@ def add_tire_deg_ratings(df: pd.DataFrame) -> pd.DataFrame:
     ordinal_map = {"low": 1, "medium": 2, "high": 3}
     tire_deg_csv["deg_rating"] = tire_deg_csv["deg_rating"].map(ordinal_map)
     df = df.merge(tire_deg_csv, left_on="Location", right_on="location", how="left")
-    df = df.drop(columns=['circuit', 'deg_notes', 'country', 'track_archetypes'])
+    df = df.drop(columns=['circuit', 'deg_notes', 'country', 'track_archetypes', 'location'])
     return df
 
 def add_circuit_history(df: pd.DataFrame) -> pd.DataFrame:
@@ -276,7 +294,7 @@ def add_team_strategy_score(df: pd.DataFrame, pit_stops_path="data/processed/pit
     df = df.drop(columns=["strategy_delta"])
     return df
 
-def add_weather_features(df, weather_path):
+def add_weather_features(df, weather_path="data/processed/weather.parquet"):
     """
     Merges weather data (actual or forecast) onto the main feature
     table, joined on (year, round_number). No leakage-safe shift
@@ -488,5 +506,62 @@ def add_telemetry_tire_deg(df, stint_data_path="data/processed/tire_degradation.
     )
 
     df = df.merge(circuit_agg, on="Location", how="left")
+
+    return df
+
+def build_feature_table(use_telemetry_tire_deg=False):
+    """
+    Assembles the full feature table by chaining all Tier 1-3 add_* functions
+    in dependency order, starting from load_results().
+
+    use_telemetry_tire_deg toggles between the manual CSV-based tire deg
+    rating (add_tire_deg_ratings) and the objective telemetry-derived one
+    (add_telemetry_tire_deg) in line with the dual planned model which compares 
+    the two models while all else held identical.
+    """
+    df = load_results()
+
+    # Tier 1 features
+    df = add_rolling_finish(df)
+    df = add_dnf_rate(df)
+    df = add_standings(df)
+    df = add_reg_era_flags(df)
+    df = add_pu_dnf_rate(df)
+    df = add_standings_position(df)
+
+    # Tier 2 features
+    if use_telemetry_tire_deg:
+        df = add_telemetry_tire_deg(df)
+    else:
+        df = add_tire_deg_ratings(df)
+    df = add_circuit_history(df)
+    df = add_track_archetype(df)
+
+    jaccard_df = build_circuit_tag_matrix(df)
+    df = add_constructor_archetype_performance(df, jaccard_df)
+
+    df = add_team_strategy_score(df)
+    df = add_weather_features(df)
+
+    # Tier 3 features
+    df = add_career_dnf_rate(df)
+    df = add_multiseason_history(df)
+    
+    # GridPosition == 0 represents pit-lane starts, not an actual grid slot.
+    # Remapping to max_grid_position + 1 so it's treated as worse than last,
+    # not better than P1, otherwise the model reads it as an advantage
+    max_grid = df["GridPosition"].max()
+    df["GridPosition"] = df["GridPosition"].replace(0, max_grid + 1)
+    
+    # As per the project spec, qualifying times are not relevant, as the
+    # model should only use starting position (GridPosition) as a feature, 
+    # not the raw Q1/Q2/Q3 times.
+    df = df.drop(columns=['Q1', 'Q2', 'Q3'])
+
+    # Time is the race finish time (which is post-race) not something known
+    # before lights out. Keeping it as a model input would be direct leakage
+    # (the model would essentially see the answer). Dropping it here: it's
+    # metadata about the race result, not a valid predictive feature.
+    df = df.drop(columns=["Time"])
 
     return df
