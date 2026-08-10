@@ -259,7 +259,6 @@ def add_team_strategy_score(df: pd.DataFrame, pit_stops_path="data/processed/pit
     field_avg = pits.groupby(["year", "round_number"])["pit_duration"].mean()
     field_avg = field_avg.reset_index().rename(columns={"pit_duration": "field_avg_pit"})
 
-    # merge the two, and then compute the delta
     merged = team_race_avg.merge(field_avg, on=["year", "round_number"])
     merged["strategy_delta"] = merged["team_avg_pit"] - merged["field_avg_pit"]
 
@@ -270,7 +269,6 @@ def add_team_strategy_score(df: pd.DataFrame, pit_stops_path="data/processed/pit
         how="left"
     )
 
-    # leakage-safe season-to-date score 
     df["TeamStrategyScore"] = df.groupby(["TeamId", "year"])["strategy_delta"].transform(
         lambda x: x.shift(1).expanding().mean()
     )
@@ -282,15 +280,213 @@ def add_weather_features(df, weather_path):
     """
     Merges weather data (actual or forecast) onto the main feature
     table, joined on (year, round_number). No leakage-safe shift
-    needed — weather is per-race exogenous data, not derived from
+    needed, weather is per-race exogenous data, not derived from
     past race outcomes.
     """
     weather = pd.read_csv(weather_path) if weather_path.endswith(".csv") else pd.read_parquet(weather_path)
 
-    # keep only the columns you actually want as model features
     weather_cols = ["year", "round_number", "rain_flag", "avg_track_temp", "avg_air_temp", "humidity"]
     weather = weather[weather_cols]
 
     merged = df.merge(weather, on=["year", "round_number"], how="left")
 
     return merged
+
+def add_career_dnf_rate(df, extended_results_path="data/processed/race_results_extended.parquet"):
+    """
+    Adds CareerMechanicalDNFRate and CareerDriverErrorDNFRate, a driver's
+    mechanical and driver-error DNF rate across their full career history
+    (2018+), not just the current season.
+
+    Uses a separate, wider historical table (race_results_extended.parquet,
+    2018-2024) rather than the main df, since veterans need career depth
+    that the main 2022+ table doesn't have. Leakage-safe: shift(1) before
+    expanding() ensures each race only sees DNFs from strictly prior races.
+    No year reset in the groupby as this is career-spanning, unlike the
+    season-level DNF rate.
+
+    Merged onto df via left join on (DriverId, year, round_number), so row
+    count is preserved. Rows for drivers/races outside the extended table's
+    coverage will have NaN, consistent with the project's honest-NaN
+    convention (no fillna at this stage).
+
+    Known limitation: 2024 Round 3 (Australian GP) is missing Ollie
+    Bearman's row in the extended table — a one-off substitute driver not
+    captured in FastF1/Jolpica's session data for that race.
+    """
+    hist = pd.read_parquet(extended_results_path)
+    hist = hist.sort_values(["DriverId", "year", "round_number"])
+
+    hist["is_mechanical_dnf"] = hist["Status"].isin(MECHANICAL)
+    hist["is_driver_error_dnf"] = hist["Status"].isin(DRIVER_ERROR)
+
+    hist["CareerMechanicalDNFRate"] = (
+        hist.groupby("DriverId")["is_mechanical_dnf"]
+        .transform(lambda x: x.shift(1).expanding().mean())
+    )
+    hist["CareerDriverErrorDNFRate"] = (
+        hist.groupby("DriverId")["is_driver_error_dnf"]
+        .transform(lambda x: x.shift(1).expanding().mean())
+    )
+
+    merge_cols = ["DriverId", "year", "round_number", "CareerMechanicalDNFRate", "CareerDriverErrorDNFRate"]
+    df = df.merge(hist[merge_cols], on=["DriverId", "year", "round_number"], how="left")
+
+    return df
+
+DECAY_RATE = 0.7
+
+def add_multiseason_history(df, extended_results_path="data/processed/race_results_extended.parquet", decay_rate=DECAY_RATE):
+    """
+    Adds DiscountedCareerPosition: a driver's finishing position history
+    weighted so recent seasons count more than distant ones, using
+    exponential decay: weight = decay_rate ** years_ago.
+
+    Uses the same extended historical table (race_results_extended.parquet,
+    2018-2024) as add_career_dnf_rate(), this is because veterans need
+    career depth the main 2022+ table doesn't have.
+
+    decay_rate=0.7 is an initial estimate, not yet tuned against model
+    performance.
+    """
+    hist = pd.read_parquet(extended_results_path)
+    hist = hist.sort_values(["DriverId", "year", "round_number"])
+
+    def weighted_history_for_driver(group):
+        positions = group["Position"].values
+        years = group["year"].values
+        n = len(group)
+        result = [None] * n
+
+        for i in range(n):
+            if i == 0:
+                continue  # no prior races at all
+
+            prior_positions = positions[:i]
+            prior_years = years[:i]
+
+            valid = ~pd.isna(prior_positions)  # drop DNF rows from the average
+            if not valid.any():
+                continue  # all prior races were DNFs, nothing to average
+
+            prior_positions = prior_positions[valid]
+            prior_years = prior_years[valid]
+
+            years_ago = years[i] - prior_years
+            weights = decay_rate ** years_ago
+            result[i] = (prior_positions * weights).sum() / weights.sum()
+
+        return pd.Series(result, index=group.index)
+
+    hist["DiscountedCareerPosition"] = (
+        hist.groupby("DriverId", group_keys=False)[["year", "round_number", "Position"]]
+        .apply(weighted_history_for_driver, include_groups=False)
+    )
+
+    merge_cols = ["DriverId", "year", "round_number", "DiscountedCareerPosition"]
+    df = df.merge(hist[merge_cols], on=["DriverId", "year", "round_number"], how="left")
+
+    return df
+
+def estimate_tire_degradation(year, round_number):
+    """
+    Estimates per-stint tire performance from lap times: degradation_slope
+    (seconds lost per lap of tire wear) and baseline_pace (estimated
+    fresh-tire lap time), fit via linear regression on clean in-stint laps
+    (excludes out/in-laps and non-green-flag laps).
+
+    Limitation: slope reflects net pace evolution, not isolated tire
+    degradation as fuel burn (opposite direction) is not corrected for.
+    """
+    session = fastf1.get_session(year, round_number, 'R')
+    session.load(laps=True, telemetry=False, weather=False, messages=False)
+    laps = session.laps
+
+    results = []
+    for (driver, stint), stint_laps in laps.groupby(["Driver", "Stint"]):
+        stint_laps = stint_laps.sort_values("LapNumber")
+
+        if len(stint_laps) <= 2:
+            continue
+        clean_laps = stint_laps.iloc[1:-1]
+        clean_laps = clean_laps[clean_laps["TrackStatus"] == "1"]
+        clean_laps = clean_laps[clean_laps["LapTime"].notna()]
+
+        if len(clean_laps) < 6:  
+            continue
+
+        tyre_life = clean_laps["TyreLife"].values
+        lap_times = clean_laps["LapTime"].dt.total_seconds().values
+
+        if len(set(tyre_life)) < 2:  # zero variance, can't fit a line
+            continue
+
+        try:
+            slope, intercept = np.polyfit(tyre_life, lap_times, 1)
+        except np.linalg.LinAlgError:
+            continue
+
+        results.append({
+            "year": year,
+            "round_number": round_number,
+            "Location": session.event["Location"],
+            "DriverId": driver,
+            "Stint": stint,
+            "Compound": clean_laps["Compound"].iloc[0],
+            "degradation_slope": slope,       # seconds lost per lap of tire wear
+            "baseline_pace": intercept,        # estimated fresh-tire lap time (sec)
+            "n_laps": len(clean_laps),
+        })
+
+    return pd.DataFrame(results)
+
+def aggregate_circuit_tire_degradation(stint_data_path="data/processed/tire_degradation.parquet"):
+    """
+    Aggregates per-stint tire degradation estimates to circuit x compound
+    level: average degradation_slope, average baseline_pace, and stint
+    count (n_stints) as a sample-size/confidence signal for downstream use.
+
+    Drops rows with unknown compound ('None' string, not NaN — a FastF1
+    data gap for irregular stints) before aggregating.
+    """
+    stints = pd.read_parquet(stint_data_path)
+    stints = stints[stints["Compound"] != "None"]
+
+    circuit_agg = (
+        stints.groupby(["Location", "Compound"])
+        .agg(
+            avg_degradation_slope=("degradation_slope", "mean"),
+            avg_baseline_pace=("baseline_pace", "mean"),
+            n_stints=("degradation_slope", "count"),
+        )
+        .reset_index()
+    )
+
+    return circuit_agg
+
+def add_telemetry_tire_deg(df, stint_data_path="data/processed/tire_degradation.parquet"):
+    """
+    Adds TelemetryDegradationSlope and TelemetryBaselinePace, a circuit-level
+    tire degradation that estimates derived objectively from lap-time telemetry,
+    as an alternative to the manually-curated add_tire_deg_ratings().
+
+    Collapses the compound-level aggregation (aggregate_circuit_tire_degradation)
+    further to Location only, averaging across all compounds, so this merges
+    onto df at the same grain (one row per circuit) as the manual ratings 
+    enable a clean model comparison between the two tire-deg approaches.
+    """
+    circuit_compound_agg = aggregate_circuit_tire_degradation(stint_data_path)
+
+    circuit_agg = (
+        circuit_compound_agg.groupby("Location")
+        .agg(
+            TelemetryDegradationSlope=("avg_degradation_slope", "mean"),
+            TelemetryBaselinePace=("avg_baseline_pace", "mean"),
+            TelemetryTotalStints=("n_stints", "sum"),
+        )
+        .reset_index()
+    )
+
+    df = df.merge(circuit_agg, on="Location", how="left")
+
+    return df

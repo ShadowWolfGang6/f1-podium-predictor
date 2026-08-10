@@ -2,8 +2,8 @@ import os
 import fastf1
 import pandas as pd
 import time
-
-import requests 
+import requests
+from src.features import estimate_tire_degradation
 
 def setup_cache():
     cache_dir = "data/raw"
@@ -194,6 +194,64 @@ def get_forecast_weather(year, round_number, location):
         "humidity": humidity,
         "source": "forecast",
     }])
+
+def get_all_results_extended(start_year, end_year, output_path="data/processed/race_results_extended.parquet"):
+    os.makedirs("data/processed", exist_ok=True)
+    all_results = []
+
+    for year in range(start_year, end_year + 1):
+        year_results = []
+        for round_number in range(1, 25):
+            try:
+                race_results = get_race_results(year, round_number)
+                year_results.append(race_results)
+                time.sleep(5)  # throttle to stay under 500 calls/hour
+            except Exception as e:
+                print(f"Skipped {year} R{round_number}: {e}")
+                continue
+
+        if not year_results:
+            print(f"No data for {year}, skipping checkpoint")
+            continue
+
+        year_df = pd.concat(year_results, ignore_index=True)
+        year_df.to_parquet(f"data/processed/race_results_extended_{year}.parquet")
+        print(f"Checkpointed {year}: {year_df.shape}")
+
+        all_results.append(year_df)
+
+    combined = pd.concat(all_results, ignore_index=True)
+    combined.to_parquet(output_path)
+    return combined
+
+def get_all_tire_degradation(start_year, end_year):
+    os.makedirs("data/processed", exist_ok=True)
+    all_stints = []
+
+    for year in range(start_year, end_year + 1):
+        year_stints = []
+        for round_number in range(1, 25):
+            try:
+                stints = estimate_tire_degradation(year, round_number)
+                year_stints.append(stints)
+                time.sleep(5)
+            except Exception as e:
+                print(f"Skipped {year} R{round_number}: {e}")
+                continue
+
+        if not year_stints:
+            print(f"No data for {year}, skipping checkpoint")
+            continue
+
+        year_df = pd.concat(year_stints, ignore_index=True)
+        year_df.to_parquet(f"data/processed/tire_degradation_{year}.parquet")
+        print(f"Checkpointed {year}: {year_df.shape}")
+
+        all_stints.append(year_df)
+
+    combined = pd.concat(all_stints, ignore_index=True)
+    combined.to_parquet("data/processed/tire_degradation.parquet")
+    return combined
 
 if __name__ == "__main__":
     setup_cache()
