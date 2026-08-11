@@ -28,7 +28,16 @@ python src/model.py
 ```
 
 ## Results
-*To be updated as model is built and validated.*
+**Results (Brier score, lower is better):**
+
+| | Validation | Test |
+|---|---|---|
+| Grid position baseline | 0.0822 | 0.1250 |
+| Logistic regression | 0.0644 | 0.0956 |
+
+Logistic regression beat the grid-position baseline by roughly 23% on the held-out test set. TeamId was one hot encoded for this model specifically, since a linear model shouldn't treat an arbitrary label-encoded team ID as having a meaningful order. This performed marginally worse than label encoding on validation (0.0644 vs 0.0622), likely just noise given the small dataset, but one hot is the methodologically correct choice for logistic regression and is documented as the final approach.
+
+Next step is a gradient boosted tree model (XGBoost or LightGBM), which should handle label-encoded categoricals and feature interactions more naturally than logistic regression.
 
 ## Limitations
 

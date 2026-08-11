@@ -1,4 +1,5 @@
 from sklearn.preprocessing import LabelEncoder
+import pandas as pd
 
 # Column groupings by NaN cause, established via full audit of
 # build_feature_table()'s output (2022-2024, 1359 rows x 59 cols).
@@ -224,3 +225,59 @@ def prepare_model_features(df, label_encoders=None):
     df["rain_flag"] = df["rain_flag"].astype(int)
 
     return df, label_encoders
+
+def prepare_model_features_onehot_team(df, label_encoders=None, team_columns=None):
+    """
+    Variant of prepare_model_features for logistic regression, one hot
+    encoding TeamId instead of label encoding it. Linear models treat a
+    label encoded categorical as if it has a meaningful numeric order,
+    which is not true for team identity, one hot encoding avoids that
+    false assumption. DriverId, PU_Group, and Location stay label encoded
+    since one hot encoding them would add many more columns for a small
+    dataset.
+
+    team_columns: the exact set of one hot TeamId columns from train,
+    passed in when encoding val or test so both splits end up with the
+    same columns in the same order, even if a team is missing from a
+    given split. Pass None when encoding train for the first time.
+    """
+    from sklearn.preprocessing import LabelEncoder
+
+    df = df.copy()
+    df["Podium"] = (df["Position"] <= 3).astype(int)
+
+    df = df.drop(columns=LEAKAGE_COLS + IDENTIFIER_COLS + ["TeamName"])
+
+    df["TeamId"] = df["TeamId"].replace(TEAM_REBRAND_MAP)
+
+    label_cols = ["DriverId", "PU_Group", "Location"]
+
+    fit_new = label_encoders is None
+    if fit_new:
+        label_encoders = {}
+
+    for col in label_cols:
+        if fit_new:
+            le = LabelEncoder()
+            df[col] = le.fit_transform(df[col].astype(str))
+            label_encoders[col] = le
+        else:
+            le = label_encoders[col]
+            df[col] = df[col].astype(str).map(
+                lambda x: le.transform([x])[0] if x in le.classes_ else -1
+            )
+
+    team_dummies = pd.get_dummies(df["TeamId"], prefix="Team")
+    df = df.drop(columns=["TeamId"])
+
+    if team_columns is None:
+        team_columns = team_dummies.columns.tolist()
+    else:
+        team_dummies = team_dummies.reindex(columns=team_columns, fill_value=0)
+
+    df = pd.concat([df, team_dummies.astype(int)], axis=1)
+
+    df["is_cold_start"] = df["is_cold_start"].astype(int)
+    df["rain_flag"] = df["rain_flag"].astype(int)
+
+    return df, label_encoders, team_columns
