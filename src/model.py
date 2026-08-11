@@ -1,6 +1,9 @@
 from sklearn.metrics import brier_score_loss
 from sklearn.preprocessing import StandardScaler
 from sklearn.linear_model import LogisticRegression
+import xgboost as xgb
+from itertools import product
+import pandas as pd
 
 METADATA_COLS = ["year", "round_number"]
 TARGET_COL = "Podium"
@@ -56,58 +59,90 @@ def fit_logistic_baseline(train, val):
 
     return model, scaler, val_score, feature_cols
 
-def prepare_model_features_onehot_team(df, label_encoders=None, team_columns=None):
+def fit_xgboost_baseline(train, val, max_depth=4, n_estimators=100, learning_rate=0.1):
     """
-    Variant of prepare_model_features for logistic regression, one hot
-    encoding TeamId instead of label encoding it. Linear models treat a
-    label encoded categorical as if it has a meaningful numeric order,
-    which is not true for team identity, one hot encoding avoids that
-    false assumption. DriverId, PU_Group, and Location stay label encoded
-    since one hot encoding them would add many more columns for a small
-    dataset.
+    Fits an XGBoost classifier on train using label encoded categoricals,
+    no scaling needed since tree models split on thresholds regardless of
+    feature units. Returns the fitted model, val Brier score, and feature
+    columns used.
 
-    team_columns: the exact set of one hot TeamId columns from train,
-    passed in when encoding val or test so both splits end up with the
-    same columns in the same order, even if a team is missing from a
-    given split. Pass None when encoding train for the first time.
+    Starting with modest hyperparameters (max_depth=4, n_estimators=100,
+    learning_rate=0.1) as a first pass, not yet tuned.
     """
-    from sklearn.preprocessing import LabelEncoder
+    feature_cols = get_feature_columns(train)
 
-    df = df.copy()
-    df["Podium"] = (df["Position"] <= 3).astype(int)
+    X_train = train[feature_cols]
+    y_train = train[TARGET_COL]
 
-    df = df.drop(columns=LEAKAGE_COLS + IDENTIFIER_COLS + ["TeamName"])
+    X_val = val[feature_cols]
+    y_val = val[TARGET_COL]
 
-    df["TeamId"] = df["TeamId"].replace(TEAM_REBRAND_MAP)
+    model = xgb.XGBClassifier(
+        max_depth=max_depth,
+        n_estimators=n_estimators,
+        learning_rate=learning_rate,
+        eval_metric="logloss",
+        random_state=42,
+    )
+    model.fit(X_train, y_train)
 
-    label_cols = ["DriverId", "PU_Group", "Location"]
+    val_probs = model.predict_proba(X_val)[:, 1]
+    val_score = brier_score_loss(y_val, val_probs)
 
-    fit_new = label_encoders is None
-    if fit_new:
-        label_encoders = {}
+    return model, val_score, feature_cols
 
-    for col in label_cols:
-        if fit_new:
-            le = LabelEncoder()
-            df[col] = le.fit_transform(df[col].astype(str))
-            label_encoders[col] = le
-        else:
-            le = label_encoders[col]
-            df[col] = df[col].astype(str).map(
-                lambda x: le.transform([x])[0] if x in le.classes_ else -1
-            )
+from itertools import product
 
-    team_dummies = pd.get_dummies(df["TeamId"], prefix="Team")
-    df = df.drop(columns=["TeamId"])
+def grid_search_xgboost(train, val, param_grid=None):
+    """
+    Simple grid search over XGBoost hyperparameters, evaluated on val
+    Brier score. Not using cross-validation since the project's time
+    based split (train on 2022-2023, val on 2024 rounds 1-12) already
+    respects chronological order, standard k-fold cross-validation
+    would reintroduce the leakage this project has been careful to avoid.
 
-    if team_columns is None:
-        team_columns = team_dummies.columns.tolist()
-    else:
-        team_dummies = team_dummies.reindex(columns=team_columns, fill_value=0)
+    Returns the best model, best params, and a results table for all
+    combinations tried, so the full search is documented.
+    """
+    if param_grid is None:
+        param_grid = {
+            "max_depth": [2, 3, 4],
+            "n_estimators": [50, 100, 150],
+            "learning_rate": [0.01, 0.05, 0.1],
+        }
 
-    df = pd.concat([df, team_dummies.astype(int)], axis=1)
+    feature_cols = get_feature_columns(train)
+    X_train = train[feature_cols]
+    y_train = train[TARGET_COL]
+    X_val = val[feature_cols]
+    y_val = val[TARGET_COL]
 
-    df["is_cold_start"] = df["is_cold_start"].astype(int)
-    df["rain_flag"] = df["rain_flag"].astype(int)
+    results = []
+    best_score = float("inf")
+    best_model = None
+    best_params = None
 
-    return df, label_encoders, team_columns
+    keys = list(param_grid.keys())
+    for values in product(*param_grid.values()):
+        params = dict(zip(keys, values))
+
+        model = xgb.XGBClassifier(
+            **params,
+            eval_metric="logloss",
+            random_state=42,
+        )
+        model.fit(X_train, y_train)
+
+        val_probs = model.predict_proba(X_val)[:, 1]
+        score = brier_score_loss(y_val, val_probs)
+
+        results.append({**params, "val_brier": score})
+
+        if score < best_score:
+            best_score = score
+            best_model = model
+            best_params = params
+
+    results_df = pd.DataFrame(results).sort_values("val_brier")
+
+    return best_model, best_params, best_score, results_df, feature_cols

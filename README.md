@@ -57,6 +57,25 @@ Pushing further to 0.25 doesn't help. Recall stays the same at 0.83, but precisi
 
 This threshold choice is itself a modeling decision. Different applications might reasonably prefer different tradeoffs between catching more true podiums and avoiding false alarms. Since Brier score doesn't depend on any threshold, it stays the honest primary metric for comparing models, but this analysis adds useful depth on how the model behaves in practice.
 
+## Gradient Boosted Model: XGBoost
+
+Built an XGBoost classifier on top of the same feature table, using label encoded categoricals directly rather than one hot encoding, since tree based models split on thresholds and do not assume a false numeric order for identity features like TeamId. This was the direct payoff of the earlier one hot versus label encoding investigation done for logistic regression.
+
+**Hyperparameter search:** ran two rounds of grid search on the validation set, no random k fold cross validation, since the project's time based split already respects chronological order and standard cross validation would reintroduce leakage. The first search covered a modest grid across max_depth, n_estimators, and learning_rate. A second, refined search widened the range of n_estimators and narrowed in on the learning rates that performed best in the first round. Both searches converged on the same winning configuration, max_depth=4, n_estimators=50, learning_rate=0.1, a good sign the result is stable and not up to pure luck.
+
+**Results (Brier score, lower is better):**
+
+| | Validation | Test |
+|---|---|---|
+| Grid position baseline | 0.0822 | 0.1250 |
+| Logistic regression | 0.0644 | 0.0956 |
+| XGBoost (tuned) | 0.0632 | 0.0886 |
+
+XGBoost beat logistic regression by roughly 7 percent and the grid baseline by roughly 29 percent on the held out test set. The improvement held in the same direction from validation to test across every model, none of them reversed or collapsed on unseen data, a good sign the whole pipeline generalizes rather than overfitting to one particular slice.
+
+**Feature importance:** the top features from XGBoost closely match the top coefficients from logistic regression, GridPosition dominates by a wide margin in both, followed by Drivers_Standings, RollingFinish, and DiscountedCareerPosition. This agreement between two structurally different models is a strong, independent validation that the feature engineering captured real signal rather than something specific to one algorithm.
+
+
 ## Limitations
 
 ### Weather Features (Tier 2)
