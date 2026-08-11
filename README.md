@@ -39,6 +39,24 @@ Logistic regression beat the grid-position baseline by roughly 23% on the held-o
 
 Next step is a gradient boosted tree model (XGBoost or LightGBM), which should handle label-encoded categoricals and feature interactions more naturally than logistic regression.
 
+## Threshold Sensitivity Analysis (Logistic Regression)
+
+Brier score is the primary metric for this project since it evaluates probability quality directly and doesn't depend on any cutoff. But it's also worth checking how the model behaves as a binary classifier, since that requires picking a threshold to convert predicted probabilities into a podium or no podium call.
+
+Tested three thresholds on the held out test set:
+
+| Threshold | Precision (Podium) | Recall (Podium) | F1 (Podium) |
+|---|---|---|---|
+| 0.50 | 0.51 | 0.61 | 0.56 |
+| 0.30 | 0.51 | 0.83 | 0.63 |
+| 0.25 | 0.48 | 0.83 | 0.61 |
+
+The default 0.5 threshold is too conservative for a relatively rare event like a podium finish, which only happens in about 15% of rows. Lowering the threshold to 0.3 catches significantly more real podiums, recall goes from 0.61 to 0.83, while precision stays essentially flat. That's a genuinely better tradeoff all things considered.
+
+Pushing further to 0.25 doesn't help. Recall stays the same at 0.83, but precision drops a bit further, from 0.51 to 0.48, so 0.3 looks like the better operating point of the two.
+
+This threshold choice is itself a modeling decision. Different applications might reasonably prefer different tradeoffs between catching more true podiums and avoiding false alarms. Since Brier score doesn't depend on any threshold, it stays the honest primary metric for comparing models, but this analysis adds useful depth on how the model behaves in practice.
+
 ## Limitations
 
 ### Weather Features (Tier 2)
