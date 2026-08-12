@@ -23,16 +23,13 @@ TEAM_NAME_TO_ID = {
     "Kick Sauber": "sauber",
 }
 
-# Rebrand consolidation: AlphaTauri->RB and Alfa Romeo->Kick Sauber are the
-# same underlying team across the rename. Standardized on the *current* (2024+) identity, 
-# since that's what the model will be predicting on going into 2026.
-TEAM_REBRAND_MAP = {
-    "alphatauri": "rb",
-    "alfa": "sauber",
+LOCATION_NORMALIZE_MAP = {
+    "Miami Gardens": "Miami",
 }
 
 def load_results(path: str = "data/processed/race_results.parquet") -> pd.DataFrame:
     df = pd.read_parquet(path)
+    df["Location"] = df["Location"].replace(LOCATION_NORMALIZE_MAP)
     df = df.sort_values(by=["year", "round_number", "Position"])
     return df
 

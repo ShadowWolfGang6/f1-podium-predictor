@@ -19,7 +19,7 @@ def get_race_results(year, round_number):
     df["Location"] = session.event["Location"]
     return df
 
-def get_all_results(start_year, end_year):
+def get_all_results(start_year, end_year, output_path="data/processed/race_results.parquet"):
     all_results = []
     for year in range(start_year, end_year + 1):
         for round_number in range(1, 25):
@@ -31,7 +31,36 @@ def get_all_results(start_year, end_year):
                     continue
     os.makedirs("data/processed", exist_ok=True)
     combined = pd.concat(all_results, ignore_index=True)
-    combined.to_parquet("data/processed/race_results.parquet")
+    combined.to_parquet(output_path)
+    return combined
+
+def get_all_results_safe(start_year, end_year, output_path="data/processed/race_results.parquet"):
+    """
+    Same as get_all_results, but merges with existing data at output_path
+    instead of overwriting it. Prevents accidentally wiping out previously
+    ingested seasons when pulling a new one, the exact mistake that
+    happened pulling 2025 while 2022 to 2024 was already saved.
+    """
+    all_results = []
+    for year in range(start_year, end_year + 1):
+        for round_number in range(1, 25):
+            try:
+                race_results = get_race_results(year, round_number)
+                all_results.append(race_results)
+            except Exception as e:
+                    print(f"Skipped {year} R{round_number}: {e}")
+                    continue
+    os.makedirs("data/processed", exist_ok=True)
+    new_data = pd.concat(all_results, ignore_index=True)
+
+    if os.path.exists(output_path):
+        existing = pd.read_parquet(output_path)
+        combined = pd.concat([existing, new_data], ignore_index=True)
+        combined = combined.drop_duplicates(subset=["year", "round_number", "DriverId"], keep="last")
+    else:
+        combined = new_data
+
+    combined.to_parquet(output_path)
     return combined
 
 def get_pit_stops(year, round_number):

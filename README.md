@@ -75,6 +75,31 @@ XGBoost beat logistic regression by roughly 7 percent and the grid baseline by r
 
 **Feature importance:** the top features from XGBoost closely match the top coefficients from logistic regression, GridPosition dominates by a wide margin in both, followed by Drivers_Standings, RollingFinish, and DiscountedCareerPosition. This agreement between two structurally different models is a strong, independent validation that the feature engineering captured real signal rather than something specific to one algorithm.
 
+## 2025 Season Backtest
+
+Once the 2025 season data was available, both models were retrained on all prior history through 2024 (2022-2024 combined, rather than the original 2022-2023 only split) and used to predict every 2025 race. This mirrors how the models will actually be used for live 2026 predictions, relying on every prior season available at prediction time. Hyperparameters were reused exactly as tuned earlier, not retuned against 2025, since doing so would leak information into what is meant to be a genuinely clean holdout test, a full season neither model had touched in any form.
+
+**Results (Brier score, lower is better):**
+
+| | 2024 Test Set | 2025 Full Season |
+|---|---|---|
+| Logistic regression | 0.0956 | 0.0685 |
+| XGBoost | 0.0886 | 0.0678 |
+
+Both models improved meaningfully on 2025 compared to the original 2024 test, likely because they were trained on more history, 2022-2024 combined versus 2022-2023 only, exactly the benefit you would expect and rely on for real predictions going forward.
+
+**On Brier score alone, the two models are essentially tied**, 0.0678 versus 0.0685, a difference small enough to be within noise. But a second, more intuitive metric tells a different story. Counting how often each model's top three predicted probabilities included an actual podium finisher, summed across all 23 scored rounds:
+
+| | Correct podium picks (of 69 possible) |
+|---|---|
+| Logistic regression | 50 (72.5%) |
+| XGBoost | 46 (66.7%) |
+
+Logistic regression noticeably outperformed XGBoost on this specific measure. Reviewing the round by round predictions, XGBoost struggled more through a mid to late season stretch that included several genuinely low probability surprise results, Hulkenberg's podium from P19 at round 12 and Antonelli's podium from P17 at round 22 among them, results no pre-race model would reasonably be expected to call. I believe this is a genuine nuanced finding rather than a simple win for one model: XGBoost and logistic regression are close on probability quality overall, but logistic regression's simpler, lower variance nature appears to have produced more stable top three picks across this particular season.
+
+Round 7 (Imola) is excluded from the backtest, consistent with the project's existing handling of off calendar circuits.
+
+**Data recovery note:** during 2025 ingestion, three separate get_all_* functions (results, weather, pit stops) overwrote their combined output files instead of merging with existing 2022-2024 data, a real bug caught and fixed during this session. All three were recovered cleanly from existing per year checkpoint files with no data loss and no re-ingestion needed. A separate issue was also found and fixed during this process, FastF1 labeled the Miami circuit as "Miami Gardens" in 2025 event data, a naming drift from prior seasons that silently broke the tire degradation and archetype merge for that round. Both fixes are documented in the codebase and applied going forward.
 
 ## Limitations
 
