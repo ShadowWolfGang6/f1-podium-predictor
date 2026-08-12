@@ -77,7 +77,7 @@ XGBoost beat logistic regression by roughly 7 percent and the grid baseline by r
 
 ## 2025 Season Backtest
 
-Once the 2025 season data was available, both models were retrained on all prior history through 2024 (2022-2024 combined, rather than the original 2022-2023 only split) and used to predict every 2025 race. This mirrors how the models will actually be used for live 2026 predictions, relying on every prior season available at prediction time. Hyperparameters were reused exactly as tuned earlier, not retuned against 2025, since doing so would leak information into what is meant to be a genuinely clean holdout test, a full season neither model had touched in any form.
+Now, using the 2025 season's results, both models were retrained on all prior history through 2024 (2022-2024 combined, rather than the original 2022-2023 only split) and used to predict every 2025 race. This mirrors how the models will actually be used for live 2026 predictions (2026 Dutch GP onward) relying on every prior season available at prediction time. Hyperparameters were reused exactly as tuned earlier, not retuned against 2025, since doing so would leak information into what is meant to mirror a clean holdout test.
 
 **Results (Brier score, lower is better):**
 
