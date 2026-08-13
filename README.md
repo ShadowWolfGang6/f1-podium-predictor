@@ -104,6 +104,7 @@ Round 7 (Imola) is excluded from the backtest, consistent with the project's exi
 ## Limitations
 
 **Calibration**
+
 Per the original project plan, checked whether stated probabilities matched real world outcomes, does a model saying "70 percent chance of podium" actually correspond to a podium roughly 70 percent of the time.
 
 **Initial finding:** built a calibration curve on the 2024 test set for both models. Both were reasonably well calibrated at low predicted probabilities, but noticeably overconfident in the middle to high range. A predicted probability around 80 percent corresponded to an actual podium rate closer to 50 percent in the data.
