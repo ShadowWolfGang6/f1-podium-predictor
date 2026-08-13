@@ -99,9 +99,27 @@ Logistic regression noticeably outperformed XGBoost on this specific measure. Re
 
 Round 7 (Imola) is excluded from the backtest, consistent with the project's existing handling of off calendar circuits.
 
-**Data recovery note:** during 2025 ingestion, three separate get_all_* functions (results, weather, pit stops) overwrote their combined output files instead of merging with existing 2022-2024 data, a real bug caught and fixed during this session. All three were recovered cleanly from existing per year checkpoint files with no data loss and no re-ingestion needed. A separate issue was also found and fixed during this process, FastF1 labeled the Miami circuit as "Miami Gardens" in 2025 event data, a naming drift from prior seasons that silently broke the tire degradation and archetype merge for that round. Both fixes are documented in the codebase and applied going forward.
+**Data recovery note:** during 2025 ingestion, three separate get_all_* functions (results, weather, pit stops) overwrote their combined output files instead of merging with existing 2022-2024 data, a real bug caught and fixed during this session. All three were recovered cleanly from existing per year checkpoint files with no data loss and no re-ingestion needed. A separate issue was also found and fixed during this process, FastF1 labeled the Miami circuit as "Miami Gardens" in 2025 event data, a naming drift from prior seasons that messed up the tire degradation and archetype merge for that round. Both fixes are documented in the codebase and applied going forward.
 
 ## Limitations
+
+## Calibration
+Per the original project plan, checked whether stated probabilities matched real world outcomes, does a model saying "70 percent chance of podium" actually correspond to a podium roughly 70 percent of the time.
+
+**Initial finding:** built a calibration curve on the 2024 test set for both models. Both were reasonably well calibrated at low predicted probabilities, but noticeably overconfident in the middle to high range. A predicted probability around 80 percent corresponded to an actual podium rate closer to 50 percent in the data.
+
+**Attempted fix:** applied scikit-learn's CalibratedClassifierCV (sigmoid method, 5 fold cross validation) to both models, the standard approach named directly in the original project plan.
+
+**Result:** calibration made both models measurably worse on Brier score, not better.
+
+| | Uncalibrated | Calibrated |
+|---|---|---|
+| Logistic regression | 0.0956 | 0.1067 |
+| XGBoost | 0.0886 | 0.0930 |
+
+The calibrated models compressed nearly all predicted probabilities toward the middle of the range, the highest calibrated prediction across the entire test set was only about 0.53, compared to several uncalibrated predictions above 0.80 that were often correct, most notably for dominant drivers like Verstappen. This is a direct consequence of dataset size. CalibratedClassifierCV's cross validation splits an already modest 838 row training set into five folds of roughly 170 rows each, too little data for the calibration mapping itself to learn a stable correction without over correcting toward caution.
+
+**Decision:** calibration was tested, measured, and rejected for this iteration of the project. The original, uncalibrated models remain the ones used for live 2026 predictions. This is a a real limitation rather than my oversight, as the original overconfidence issue at high probabilities is already documented, but the standard fix for it costs more than it gains given the current training set size.
 
 ### Weather Features (Tier 2)
 
@@ -114,5 +132,5 @@ Both sources are merged directly on `(year, round_number)`  there is no leakage-
 
 **Known limitations**
 - **Train/inference mismatch:** training rows use *actual* recorded weather; live rows use a *forecast*, since the true outcome isn't knowable before the race. This is a standard forecast-dependency limitation, not data leakage as weather is knowable before lights out either way, just imperfectly at inference time. A `source` column (`'actual'` vs `'forecast'`) is retained in the raw weather table for auditing, but is not used as a model feature.
-- **`avg_track_temp` is NaN for all forecast rows.** Open-Meteo does not forecast asphalt/track temperature (a function of solar load, not just air weather), only air temperature. Rather than approximate it with a proxy that could silently mislead the model, this field is left honestly missing for live predictions. `avg_air_temp` is the reliable live signal for this feature.
+- **`avg_track_temp` is NaN for all forecast rows.** Open-Meteo does not forecast asphalt/track temperature (a function of solar load, not just air weather), only air temperature. Rather than approximate it with a proxy that could silently mislead the model, this field is left missing for live predictions. `avg_air_temp` is the reliable live signal for this feature.
 - **Career DNF rate**: uses extended 2018–2024 table for career-spanning depth; however this is a documented gap 2024 R3 (Australian GP) missing Ollie Bearman's row (one-off substitute, not captured in FastF1/Jolpica for that session).
