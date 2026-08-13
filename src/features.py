@@ -21,10 +21,12 @@ TEAM_NAME_TO_ID = {
     "RB": "rb",
     "Alfa Romeo": "alfa",
     "Kick Sauber": "sauber",
+    "Cadillac": "cadillac",
 }
 
 LOCATION_NORMALIZE_MAP = {
     "Miami Gardens": "Miami",
+    "Monte Carlo": "Monaco",
 }
 
 def load_results(path: str = "data/processed/race_results.parquet") -> pd.DataFrame:
